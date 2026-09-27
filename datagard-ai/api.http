@@ -1,0 +1,207 @@
+### DataGuard AI API — REST Client test file (VS Code: humao.rest-client)
+### Start the API first:  npm run dev   (PORT=5000)
+### Requests are chained: send them top to bottom. Named requests (# @name) feed later ones.
+### Note: a review can be resolved only once (409 afterwards), so approve/reject/edit each
+### use a DIFFERENT pending review (index 0, 1, 2). Re-send "Pending reviews" to refresh.
+
+@host        = http://localhost:5000
+@baseUrl     = {{host}}/api
+@contentType = application/json
+@reviewer    = admin
+
+###############################################################
+# HEALTH
+###############################################################
+
+# Process liveness (no Fabric needed)
+GET {{host}}/health HTTP/1.1
+
+###
+
+# Fabric connectivity — 200 when connected, 503 if not configured/unreachable
+GET {{baseUrl}}/health HTTP/1.1
+
+###############################################################
+# DASHBOARD  (Screen 1)
+###############################################################
+
+GET {{baseUrl}}/dashboard HTTP/1.1
+
+###############################################################
+# HUMAN REVIEW QUEUE + RECORD EXPLORER  (Screen 2)
+###############################################################
+
+# @name pendingReviews
+GET {{baseUrl}}/reviews HTTP/1.1
+    ?status=PENDING
+    &page=1
+    &pageSize=20
+
+###
+
+# Capture ids from the queue for the requests below
+@reviewId1 = {{pendingReviews.response.body.$.data[0].reviewId}}
+@reviewId2 = {{pendingReviews.response.body.$.data[1].reviewId}}
+@reviewId3 = {{pendingReviews.response.body.$.data[2].reviewId}}
+@recordId  = {{pendingReviews.response.body.$.data[0].recordId}}
+
+# Filters: issueType = INVALID | MISSING | DUPLICATE | INCONSISTENT | AI_ANOMALY
+GET {{baseUrl}}/reviews HTTP/1.1
+    ?status=PENDING
+    &issueType=INVALID
+    &search=C10
+
+###
+
+# Already-resolved reviews (status: APPROVED | REJECTED | EDITED)
+GET {{baseUrl}}/reviews?status=APPROVED HTTP/1.1
+
+###
+
+# Record detail for the first pending review (raw record + quality + issues + AI recommendations)
+# @name record
+GET {{baseUrl}}/records/{{recordId}} HTTP/1.1
+
+###
+
+# Or a specific record
+GET {{baseUrl}}/records/C1024 HTTP/1.1
+
+###
+
+# Not found -> 404
+GET {{baseUrl}}/records/DOES-NOT-EXIST HTTP/1.1
+
+###############################################################
+# HUMAN DECISIONS  (writes: approved_records + queue + ledger)
+###############################################################
+
+# APPROVE — applies the AI suggestion as a new approved_records version
+# @name approve
+# @note Writes to Fabric: approves the first pending review
+POST {{baseUrl}}/reviews/{{reviewId1}}/approve HTTP/1.1
+Content-Type: {{contentType}}
+
+{
+  "reviewerId": "{{reviewer}}",
+  "comment": "AI recommendation verified"
+}
+
+###
+
+# Capture the ledger id created by the approval
+@approvedDecisionId = {{approve.response.body.$.decisionId}}
+
+# REJECT — no data change, ledger entry only
+# @name reject
+# @note Writes to Fabric: rejects the second pending review
+POST {{baseUrl}}/reviews/{{reviewId2}}/reject HTTP/1.1
+Content-Type: {{contentType}}
+
+{
+  "reviewerId": "{{reviewer}}",
+  "comment": "AI suggestion is incorrect"
+}
+
+###
+
+# EDIT — reviewer supplies their own value (field defaults to the review's field)
+# @name edit
+# @note Writes to Fabric: edits the third pending review
+POST {{baseUrl}}/reviews/{{reviewId3}}/edit HTTP/1.1
+Content-Type: {{contentType}}
+
+{
+  "reviewerId": "{{reviewer}}",
+  "field": "department",
+  "value": "Engineering",
+  "comment": "Corrected manually"
+}
+
+###############################################################
+# VALIDATION / ERROR CASES  (safe to run — nothing is written)
+###############################################################
+
+# 400 — reviewerId missing
+POST {{baseUrl}}/reviews/{{reviewId1}}/approve HTTP/1.1
+Content-Type: {{contentType}}
+
+{}
+
+###
+
+# 400 — edit without a value
+POST {{baseUrl}}/reviews/{{reviewId1}}/edit HTTP/1.1
+Content-Type: {{contentType}}
+
+{ "reviewerId": "{{reviewer}}" }
+
+###
+
+# 400 — unknown status filter
+GET {{baseUrl}}/reviews?status=BOGUS HTTP/1.1
+
+###
+
+# 404 — review does not exist
+POST {{baseUrl}}/reviews/REV-NOPE/approve HTTP/1.1
+Content-Type: {{contentType}}
+
+{ "reviewerId": "{{reviewer}}" }
+
+###
+
+# 409 — re-approving an already resolved review (send "approve" above first)
+POST {{baseUrl}}/reviews/{{reviewId1}}/approve HTTP/1.1
+Content-Type: {{contentType}}
+
+{ "reviewerId": "{{reviewer}}" }
+
+###
+
+# 422 — field that cannot be corrected
+POST {{baseUrl}}/reviews/{{reviewId3}}/edit HTTP/1.1
+Content-Type: {{contentType}}
+
+{ "reviewerId": "{{reviewer}}", "field": "record_id", "value": "X" }
+
+###############################################################
+# AI DECISION LEDGER  (Screen 3)
+###############################################################
+
+# @name decisions
+GET {{baseUrl}}/decisions HTTP/1.1
+    ?page=1
+    &pageSize=20
+
+###
+
+# status = APPROVED | REJECTED | EDITED | REVIEW ; confidenceMin is 0..1
+GET {{baseUrl}}/decisions HTTP/1.1
+    ?recordId=C1024
+    &action=CORRECTED
+    &status=APPROVED
+    &confidenceMin=0.80
+
+###
+
+# Decision detail (drawer) — first ledger entry
+@decisionId = {{decisions.response.body.$.data[0].decisionId}}
+
+GET {{baseUrl}}/decisions/{{decisionId}} HTTP/1.1
+
+###
+
+# The decision created by the approval above
+GET {{baseUrl}}/decisions/{{approvedDecisionId}} HTTP/1.1
+
+###
+
+# 404
+GET {{baseUrl}}/decisions/DEC-NOPE HTTP/1.1
+
+###############################################################
+# SIX PILLARS  (Screen 4)
+###############################################################
+
+GET {{baseUrl}}/governance/pillars HTTP/1.1
